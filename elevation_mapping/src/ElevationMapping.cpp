@@ -3,7 +3,7 @@
  *
  *  Created on: Nov 12, 2013
  *      Author: Péter Fankhauser
- *	 Institute: ETH Zurich, ANYbotics
+ *   Institute: ETH Zurich, ANYbotics
  */
 #include "elevation_mapping/ElevationMapping.hpp"
 
@@ -54,7 +54,8 @@ ElevationMapping::ElevationMapping(ros::NodeHandle& nodeHandle)
       map_(nodeHandle),
       robotMotionMapUpdater_(nodeHandle),
       isContinouslyFusing_(false),
-      ignoreRobotMotionUpdates_(false)
+      ignoreRobotMotionUpdates_(false),
+      receivedFirstMatchingPointcloudAndPose_(false)
 {
   ROS_INFO("Elevation mapping node started.");
 
@@ -76,10 +77,15 @@ ElevationMapping::ElevationMapping(ros::NodeHandle& nodeHandle)
       &fusionServiceQueue_);
   fusionTriggerService_ = nodeHandle_.advertiseService(advertiseServiceOptionsForTriggerFusion);
 
-  AdvertiseServiceOptions advertiseServiceOptionsForGetSubmap = AdvertiseServiceOptions::create<grid_map_msgs::GetGridMap>(
-      "get_submap", boost::bind(&ElevationMapping::getSubmap, this, _1, _2), ros::VoidConstPtr(),
+  AdvertiseServiceOptions advertiseServiceOptionsForGetFusedSubmap = AdvertiseServiceOptions::create<grid_map_msgs::GetGridMap>(
+      "get_submap", boost::bind(&ElevationMapping::getFusedSubmap, this, _1, _2), ros::VoidConstPtr(),
       &fusionServiceQueue_);
-  submapService_ = nodeHandle_.advertiseService(advertiseServiceOptionsForGetSubmap);
+  fusedSubmapService_ = nodeHandle_.advertiseService(advertiseServiceOptionsForGetFusedSubmap);
+
+  AdvertiseServiceOptions advertiseServiceOptionsForGetRawSubmap = AdvertiseServiceOptions::create<grid_map_msgs::GetGridMap>(
+      "get_raw_submap", boost::bind(&ElevationMapping::getRawSubmap, this, _1, _2), ros::VoidConstPtr(),
+      &fusionServiceQueue_);
+  rawSubmapService_ = nodeHandle_.advertiseService(advertiseServiceOptionsForGetRawSubmap);
 
   if (!fusedMapPublishTimerDuration_.isZero()) {
     TimerOptions timerOptions = TimerOptions(
@@ -99,6 +105,7 @@ ElevationMapping::ElevationMapping(ros::NodeHandle& nodeHandle)
   }
 
   clearMapService_ = nodeHandle_.advertiseService("clear_map", &ElevationMapping::clearMap, this);
+  maskedReplaceService_ = nodeHandle_.advertiseService("masked_replace", &ElevationMapping::maskedReplace, this);
   saveMapService_ = nodeHandle_.advertiseService("save_map", &ElevationMapping::saveMap, this);
 
   initialize();
@@ -127,7 +134,12 @@ bool ElevationMapping::readParameters()
 
   double minUpdateRate;
   nodeHandle_.param("min_update_rate", minUpdateRate, 2.0);
-  maxNoUpdateDuration_.fromSec(1.0 / minUpdateRate);
+  if (minUpdateRate == 0.0) {
+    maxNoUpdateDuration_.fromSec(0.0);
+    ROS_WARN("Rate for publishing the map is zero.");
+  } else {
+    maxNoUpdateDuration_.fromSec(1.0 / minUpdateRate);
+  }
   ROS_ASSERT(!maxNoUpdateDuration_.isZero());
 
   double timeTolerance;
@@ -182,6 +194,7 @@ bool ElevationMapping::readParameters()
   nodeHandle_.param("underlying_map_topic", map_.underlyingMapTopic_, string());
   nodeHandle_.param("enable_visibility_cleanup", map_.enableVisibilityCleanup_, true);
   nodeHandle_.param("scanning_duration", map_.scanningDuration_, 1.0);
+  nodeHandle_.param("masked_replace_service_mask_layer_name", maskedReplaceServiceMaskLayerName_, string("mask"));
 
   // SensorProcessor parameters.
   string sensorType;
@@ -237,6 +250,20 @@ void ElevationMapping::visibilityCleanupThread()
 void ElevationMapping::pointCloudCallback(
     const sensor_msgs::PointCloud2& rawPointCloud)
 {
+  // Check if point cloud has corresponding robot pose at the beginning
+  if(!receivedFirstMatchingPointcloudAndPose_) {
+    const double oldestPoseTime = robotPoseCache_.getOldestTime().toSec();
+    const double currentPointCloudTime = rawPointCloud.header.stamp.toSec();
+
+    if(currentPointCloudTime < oldestPoseTime) {
+      ROS_WARN_THROTTLE(5, "No corresponding point cloud and pose are found. Waiting for first match.");
+      return;
+    } else {
+      ROS_INFO("First corresponding point cloud and pose found, initialized. ");
+      receivedFirstMatchingPointcloudAndPose_ = true;
+    }
+  }
+
   stopMapUpdateTimer();
 
   boost::recursive_mutex::scoped_lock scopedLock(map_.getRawDataMutex());
@@ -268,7 +295,12 @@ void ElevationMapping::pointCloudCallback(
   if (!ignoreRobotMotionUpdates_) {
     boost::shared_ptr<geometry_msgs::PoseWithCovarianceStamped const> poseMessage = robotPoseCache_.getElemBeforeTime(lastPointCloudUpdateTime_);
     if (!poseMessage) {
-      ROS_ERROR("Could not get pose information from robot for time %f. Buffer empty?", lastPointCloudUpdateTime_.toSec());
+      // Tell the user that either for the timestamp no pose is available or that the buffer is possibly empty
+      if(robotPoseCache_.getOldestTime().toSec() > lastPointCloudUpdateTime_.toSec()) {
+        ROS_ERROR("The oldest pose available is at %f, requested pose at %f", robotPoseCache_.getOldestTime().toSec(), lastPointCloudUpdateTime_.toSec());
+      } else {
+        ROS_ERROR("Could not get pose information from robot for time %f. Buffer empty?", lastPointCloudUpdateTime_.toSec());
+      }
       return;
     }
     robotPoseCovariance = Eigen::Map<const Eigen::MatrixXd>(poseMessage->pose.covariance.data(), 6, 6);
@@ -303,7 +335,7 @@ void ElevationMapping::pointCloudCallback(
 
 void ElevationMapping::mapUpdateTimerCallback(const ros::TimerEvent&)
 {
-  ROS_WARN("Elevation map is updated without data from the sensor.");
+  ROS_WARN_THROTTLE(5, "Elevation map is updated without data from the sensor.");
 
   boost::recursive_mutex::scoped_lock scopedLock(map_.getRawDataMutex());
 
@@ -368,7 +400,12 @@ bool ElevationMapping::updatePrediction(const ros::Time& time)
   // Get robot pose at requested time.
   boost::shared_ptr<geometry_msgs::PoseWithCovarianceStamped const> poseMessage = robotPoseCache_.getElemBeforeTime(time);
   if (!poseMessage) {
-    ROS_ERROR("Could not get pose information from robot for time %f. Buffer empty?", time.toSec());
+    // Tell the user that either for the timestamp no pose is available or that the buffer is possibly empty
+    if(robotPoseCache_.getOldestTime().toSec() > lastPointCloudUpdateTime_.toSec()) {
+      ROS_ERROR("The oldest pose available is at %f, requested pose at %f", robotPoseCache_.getOldestTime().toSec(), lastPointCloudUpdateTime_.toSec());
+    } else {
+      ROS_ERROR("Could not get pose information from robot for time %f. Buffer empty?", lastPointCloudUpdateTime_.toSec());
+    }
     return false;
   }
 
@@ -408,7 +445,7 @@ bool ElevationMapping::updateMapLocation()
   return true;
 }
 
-bool ElevationMapping::getSubmap(grid_map_msgs::GetGridMap::Request& request, grid_map_msgs::GetGridMap::Response& response)
+bool ElevationMapping::getFusedSubmap(grid_map_msgs::GetGridMap::Request& request, grid_map_msgs::GetGridMap::Response& response)
 {
   grid_map::Position requestedSubmapPosition(request.position_x, request.position_y);
   Length requestedSubmapLength(request.length_x, request.length_y);
@@ -435,10 +472,80 @@ bool ElevationMapping::getSubmap(grid_map_msgs::GetGridMap::Request& request, gr
   return isSuccess;
 }
 
+bool ElevationMapping::getRawSubmap(grid_map_msgs::GetGridMap::Request& request, grid_map_msgs::GetGridMap::Response& response)
+{
+  grid_map::Position requestedSubmapPosition(request.position_x, request.position_y);
+  Length requestedSubmapLength(request.length_x, request.length_y);
+  ROS_DEBUG("Elevation raw submap request: Position x=%f, y=%f, Length x=%f, y=%f.", requestedSubmapPosition.x(), requestedSubmapPosition.y(), requestedSubmapLength(0), requestedSubmapLength(1));
+  boost::recursive_mutex::scoped_lock scopedLock(map_.getRawDataMutex());
+
+  bool isSuccess;
+  Index index;
+  GridMap subMap = map_.getRawGridMap().getSubmap(requestedSubmapPosition, requestedSubmapLength, index, isSuccess);
+  scopedLock.unlock();
+
+  if (request.layers.empty()) {
+    GridMapRosConverter::toMessage(subMap, response.map);
+  } else {
+    vector<string> layers;
+    for (const auto& layer : request.layers) {
+      layers.push_back(layer);
+    }
+    GridMapRosConverter::toMessage(subMap, layers, response.map);
+  }
+  return isSuccess;
+}
+
 bool ElevationMapping::clearMap(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
 {
   ROS_INFO("Clearing map.");
   return map_.clear();
+}
+
+bool ElevationMapping::maskedReplace(grid_map_msgs::SetGridMap::Request& request, grid_map_msgs::SetGridMap::Response& response) {
+  ROS_INFO("Masked replacing of map.");
+  GridMap sourceMap;
+  GridMapRosConverter::fromMessage(request.map, sourceMap);
+
+  // Use the supplied mask or do not use a mask
+  grid_map::Matrix mask;
+  if (sourceMap.exists(maskedReplaceServiceMaskLayerName_)) {
+    mask = sourceMap[maskedReplaceServiceMaskLayerName_];
+  } else {
+    mask = Eigen::MatrixXf::Ones(sourceMap.getSize()(0),sourceMap.getSize()(1));
+  }
+
+  boost::recursive_mutex::scoped_lock scopedLockRawData(map_.getRawDataMutex());
+
+  // Loop over all layers that should be set
+  for (auto sourceLayerIterator = sourceMap.getLayers().begin(); sourceLayerIterator != sourceMap.getLayers().end(); sourceLayerIterator++) {
+    //skip "mask" layer
+    if (*sourceLayerIterator == maskedReplaceServiceMaskLayerName_) continue;
+    grid_map::Matrix &sourceLayer = sourceMap[*sourceLayerIterator];
+    // Check if the layer exists in the elevation map
+    if (map_.getRawGridMap().exists(*sourceLayerIterator)) {
+      grid_map::Matrix &destinationLayer = map_.getRawGridMap()[*sourceLayerIterator];
+      for (GridMapIterator destinationIterator(map_.getRawGridMap()); !destinationIterator.isPastEnd(); ++destinationIterator) {
+        // Use the position to find corresponding indices in source and destination
+        const grid_map::Index destinationIndex(*destinationIterator);
+        grid_map::Position position;
+        map_.getRawGridMap().getPosition(*destinationIterator, position);
+
+        if (!sourceMap.isInside(position)) continue;
+
+        grid_map::Index sourceIndex;
+        sourceMap.getIndex(position, sourceIndex);
+        // If the mask allows it, set the value from source to destination
+        if (!std::isnan(mask(sourceIndex(0), sourceIndex(1)))) {
+          destinationLayer(destinationIndex(0), destinationIndex(1)) = sourceLayer(sourceIndex(0), sourceIndex(1));
+        }
+      }
+    } else {
+      ROS_ERROR("Masked replace service: Layer %s does not exist!", sourceLayerIterator->c_str());
+    }
+  }
+
+  return true;
 }
 
 bool ElevationMapping::saveMap(grid_map_msgs::ProcessFile::Request& request, grid_map_msgs::ProcessFile::Response& response)
@@ -447,6 +554,9 @@ bool ElevationMapping::saveMap(grid_map_msgs::ProcessFile::Request& request, gri
   boost::recursive_mutex::scoped_lock scopedLock(map_.getFusedDataMutex());
   map_.fuseAll();
   std::string topic = nodeHandle_.getNamespace() + "/elevation_map";
+  if (!request.topic_name.empty()) {
+    topic = nodeHandle_.getNamespace() + "/" + request.topic_name;
+  }
   response.success = GridMapRosConverter::saveToBag(map_.getFusedGridMap(), request.file_path, topic);
   response.success = GridMapRosConverter::saveToBag(map_.getRawGridMap(), request.file_path + "_raw", topic + "_raw");
   return response.success;

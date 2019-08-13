@@ -4,7 +4,9 @@
 
 This is a [ROS] package developed for elevation mapping with a mobile robot. The software is designed for (local) navigation tasks with robots which are equipped with a pose estimation (e.g. IMU & odometry) and a distance sensor (e.g. structured light (Kinect, RealSense), laser range sensor, stereo camera). The provided elevation map is limited around the robot and reflects the pose uncertainty that is aggregated through the motion of the robot (robot-centric mapping). This method is developed to explicitly handle drift of the robot pose estimation.
 
-The Robot-Centric Elevation Mapping packages have been tested under ROS Kinetic and Ubuntu 16.04. This is research code, expect that it changes often and any fitness for a particular purpose is disclaimed.
+The Robot-Centric Elevation Mapping packages have been tested under ROS Melodic and Ubuntu 18.04. This is research code, expect that it changes often and any fitness for a particular purpose is disclaimed.
+
+The source code is released under a [BSD 3-Clause license](LICENSE).
 
 **Author: Péter Fankhauser<br />
 Affiliation: [ANYbotics](https://www.anybotics.com/)<br />
@@ -13,8 +15,6 @@ Maintainer: Péter Fankhauser, pfankhauser@anybotics.com<br />**
 This projected was initially developed at ETH Zurich (Autonomous Systems Lab & Robotic Systems Lab).
 
 [This work is conducted as part of ANYmal Research, a community to advance legged robotics.](https://www.anymal-research.org/)
-
-[![Build Status](https://ci.leggedrobotics.com/buildStatus/icon?job=github_anybotics/elevation_mapping/master)](https://ci.leggedrobotics.com/job/github_anybotics/job/elevation_mapping/job/master/)
 
 <img alt="Elevation Map Example" src="elevation_mapping_demos/doc/elevation_map.jpg" width="700">
 
@@ -134,9 +134,15 @@ This is the main Robot-Centric Elevation Mapping node. It uses the distance sens
 
 * **`get_submap`** ([grid_map_msg/GetGridMap])
 
-    Get a fused elevation submap for a requested position and size. For example, you can get the fused elevation submap at position (-0.5, 0.0) and size (0.5, 1.2) and safe it to a text file form the console with
+    Get a fused elevation submap for a requested position and size. For example, you can get the fused elevation submap at position (-0.5, 0.0) and size (0.5, 1.2) described in the odom frame and safe it to a text file form the console with
 
-        rosservice call -- /elevation_mapping/get_submap -0.5 0.0 0.5 1.2 []
+        rosservice call -- /elevation_mapping/get_submap odom -0.5 0.0 0.5 1.2 []
+
+* **`get_raw_submap`** ([grid_map_msg/GetGridMap])
+
+    Get a raw elevation submap for a requested position and size. For example, you can get the raw elevation submap at position (-0.5, 0.0) and size (0.5, 1.2) described in the odom frame and safe it to a text file form the console with
+
+        rosservice call -- /elevation_mapping/get_raw_submap odom -0.5 0.0 0.5 1.2 []
 
 * **`clear_map`** ([std_srvs/Empty])
 
@@ -144,6 +150,45 @@ This is the main Robot-Centric Elevation Mapping node. It uses the distance sens
 
         rosservice call /elevation_mapping/clear_map
 
+* **`masked_replace`** ([grid_map_msgs/SetGridMap])
+
+    Allows for setting the individual layers of the elevation map through a service call. The layer mask can be used to only set certain cells and not the entire map. Cells containing NAN in the mask are not set, all the others are set. If the layer mask is not supplied, the entire map will be set in the intersection of both maps. The provided map can be of different size and position than the map that will be altered. An example service call to set some cells marked with a mask in the elevation layer to 0.5 is
+
+        rosservice call /elevation_mapping/masked_replace "map:
+          info:
+            header:
+              seq: 3
+              stamp: {secs: 3, nsecs: 80000000}
+              frame_id: 'odom'
+            resolution: 0.1
+            length_x: 0.3
+            length_y: 0.3
+            pose:
+              position: {x: 5.0, y: 0.0, z: 0.0}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 0.0}
+          layers: [elevation,mask]
+          basic_layers: [elevation]
+          data:
+          - layout:
+              dim:
+              - {label: 'column_index', size: 3, stride: 9}
+              - {label: 'row_index', size: 3, stride: 3}
+              data_offset: 0
+            data: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+          - layout:
+              dim:
+              - {label: 'column_index', size: 3, stride: 9}
+              - {label: 'row_index', size: 3, stride: 3}
+              data_offset: 0
+            data: [0, 0, 0, .NAN, .NAN, .NAN, 0, 0, 0]
+          outer_start_index: 0
+          inner_start_index: 0"
+
+* **`save_map`** ([grid_map_msgs/ProcessFile])
+
+    Saves the current fused grid map and raw grid map to rosbag files. Field `topic_name` must be a base name, i.e. no leading slash character (/). If field `topic_name` is empty, then `elevation_map` is used per default. Example with default topic name
+
+        rosservice call /elevation_mapping/save_map "file_path: '/home/integration/elevation_map.bag' topic_name: ''"
 
 #### Parameters
 
@@ -193,7 +238,7 @@ This is the main Robot-Centric Elevation Mapping node. It uses the distance sens
 
 * **`position_x`**, **`position_y`** (double, default: 0.0)
 
-    The position of the elevation map (center) in the elevation map frame.
+    The position of the elevation map center, in the elevation map frame. This parameter sets the planar position offsets between the generated elevation map and the frame in which it is published (`map_frame_id`). It is only useful if no `track_point_frame_id` parameter is used.
 
 * **`resolution`** (double, default: 0.01, min: 0.0)
 
@@ -205,11 +250,14 @@ This is the main Robot-Centric Elevation Mapping node. It uses the distance sens
 
 * **`mahalanobis_distance_threshold`** (double, default: 2.5)
 
-    The threshold for the Mahalanobis distance. Decides if measurements are fused with the existing data, overwritten or ignored.
+    Each cell in the elevation map has an uncertainty for its height value. Depending on the Mahalonobis distance of the existing height distribution and the new measurements, the incoming data is fused with the existing estimate, overwritten, or ignored. This parameter determines the threshold on the Mahalanobis distance which determines how the incoming measurements are processed.
+
+* **`sensor_processor/ignore_points_above`** (double, default: 0.4)
+    A hard threshold on the height of points introduced by the depth sensor. Points with a height over this threshold will not be considered valid during the data collection step.
 
 * **`multi_height_noise`** (double, default: 9.0e-7)
 
-    Added noise for cell with multiple height measurements (e.g. walls).
+    Noise added to measurements that are higher than the current elevation map at that particular position. This noise-adding process is only performed if a point falls over the Mahalanobis distance threshold. A higher value is useful to adapt faster to dynamic environments (e.g., moving objects), but might cause more noise in the height estimation.
 
 * **`min_horizontal_variance`**, **`max_horizontal_variance`** (double, default: pow(resolution / 2.0, 2), 0.5)
 
@@ -217,7 +265,7 @@ This is the main Robot-Centric Elevation Mapping node. It uses the distance sens
 
 * **`enable_visibility_cleanup`** (bool, default: true)
 
-    Enable visibility cleanup. This runs a separate thread to remove elements in the map based on the visibility constraint.
+    Enable/disable a separate thread that removes elements from the map which are not visible anymore, by means of ray-tracing, originating from the sensor frame.
 
 * **`visibility_cleanup_rate`** (double, default: 1.0)
 
@@ -225,7 +273,7 @@ This is the main Robot-Centric Elevation Mapping node. It uses the distance sens
 
 * **`scanning_duration`** (double, default: 1.0)
 
-    The sensor's scanning duration (in s) which is used for the visibility cleanup. Set this roughly to the duration it takes between two consecutive full scans (e.g. 0.033 for a ToF camera with 30 Hz, or 3 s for a rotating laser scanner). Depending on how dense or sparse your scans are, increase or reduce the scanning duration. Smaller values lead to faster dynamic object removal and bigger values help to reduce faulty map cleanups.   
+    The sensor's scanning duration (in s) which is used for the visibility cleanup. Set this roughly to the duration it takes between two consecutive full scans (e.g. 0.033 for a ToF camera with 30 Hz, or 3 s for a rotating laser scanner). Depending on how dense or sparse your scans are, increase or reduce the scanning duration. Smaller values lead to faster dynamic object removal and bigger values help to reduce faulty map cleanups.
 
 * **`sensor_cutoff_min_depth`**, **`sensor_cutoff_max_depth`** (double, default: 0.2, 2.0)
 
@@ -249,3 +297,4 @@ Please report bugs and request features using the [Issue Tracker](https://github
 [tf/tfMessage]: http://docs.ros.org/kinetic/api/tf/html/msg/tfMessage.html
 [std_srvs/Empty]: http://docs.ros.org/api/std_srvs/html/srv/Empty.html
 [grid_map_msg/GetGridMap]: https://github.com/anybotics/grid_map/blob/master/grid_map_msg/srv/GetGridMap.srv
+[grid_map_msgs/ProcessFile]: https://github.com/ANYbotics/grid_map/blob/master/grid_map_msgs/srv/ProcessFile.srv
