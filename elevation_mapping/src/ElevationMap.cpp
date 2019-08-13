@@ -140,7 +140,7 @@ bool ElevationMap::add(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr pointCloud, 
     }
 
     // Fuse measurement with elevation map data.
-    elevation = (variance * point.z + pointVariance * elevation) / (variance + pointVariance);//(6)
+    elevation = (variance * point.z + pointVariance * elevation) / (variance + pointVariance);
     variance = (pointVariance * variance) / (pointVariance + variance);
     // TODO Add color fusion.
     colorVectorToValue(point.getRGBVector3i(), color);
@@ -374,13 +374,10 @@ bool ElevationMap::clear()
 {
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
   boost::recursive_mutex::scoped_lock scopedLockForFusedData(fusedMapMutex_);
-  boost::recursive_mutex::scoped_lock scopedLockForVisibilityCleanupData(visibilityCleanupMapMutex_);
   rawMap_.clearAll();
   rawMap_.resetTimestamp();
   fusedMap_.clearAll();
   fusedMap_.resetTimestamp();
-  visibilityCleanupMap_.clearAll();
-  visibilityCleanupMap_.resetTimestamp();
   return true;
 }
 
@@ -399,13 +396,11 @@ void ElevationMap::visibilityCleanup(const ros::Time& updatedTime)
   rawMap_.clear("sensor_y_at_lowest_scan");
   rawMap_.clear("sensor_z_at_lowest_scan");
   scopedLockForRawData.unlock();
-  visibilityCleanupMap_.add("max_height");//WSHY: Gridmap add a new layer
+  visibilityCleanupMap_.add("max_height");
 
   // Create max. height layer with ray tracing.
-  // WSHY: Iterate each cell of the map row by row
   for (GridMapIterator iterator(visibilityCleanupMap_); !iterator.isPastEnd(); ++iterator) {
     if (!visibilityCleanupMap_.isValid(*iterator)) continue;
-    //WSHY: get the sensor scan data
     const auto& lowestScanPoint = visibilityCleanupMap_.at("lowest_scan_point", *iterator);
     const auto& sensorXatLowestScan = visibilityCleanupMap_.at("sensor_x_at_lowest_scan", *iterator);
     const auto& sensorYatLowestScan = visibilityCleanupMap_.at("sensor_y_at_lowest_scan", *iterator);
@@ -413,14 +408,11 @@ void ElevationMap::visibilityCleanup(const ros::Time& updatedTime)
     if (std::isnan(lowestScanPoint)) continue;
     Index indexAtSensor;
     if(!visibilityCleanupMap_.getIndex(Position(sensorXatLowestScan, sensorYatLowestScan), indexAtSensor)) continue;
-    //WSHY: calculate the difference of cell position in map and the position of sensor scan
     Position point;
     visibilityCleanupMap_.getPosition(*iterator, point);
     float pointDiffX = point.x() - sensorXatLowestScan;
     float pointDiffY = point.y() - sensorYatLowestScan;
     float distanceToPoint = sqrt(pointDiffX * pointDiffX + pointDiffY * pointDiffY);
-    //WSHY: a ray trace from the sensor to every grid, if the elavation of one grid is higher than the ray trace
-    // appearently the grid should be removed
     if (distanceToPoint > 0.0) {
       for (grid_map::LineIterator iterator(visibilityCleanupMap_, indexAtSensor, *iterator); !iterator.isPastEnd(); ++iterator) {
         Position cellPosition;

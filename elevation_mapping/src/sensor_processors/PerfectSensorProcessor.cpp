@@ -35,18 +35,7 @@ PerfectSensorProcessor::~PerfectSensorProcessor()
 
 bool PerfectSensorProcessor::readParameters()
 {
-  return true;
-}
-
-bool PerfectSensorProcessor::cleanPointCloud(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr pointCloud)
-{
-  pcl::PointCloud<pcl::PointXYZRGB> tempPointCloud;
-  std::vector<int> indices;
-  pcl::removeNaNFromPointCloud(*pointCloud, tempPointCloud, indices);
-  tempPointCloud.is_dense = true;
-  pointCloud->swap(tempPointCloud);
-  ROS_DEBUG("ElevationMap: cleanPointCloud() reduced point cloud to %i points.", static_cast<int>(pointCloud->size()));
-  return true;
+    return SensorProcessorBase::readParameters();
 }
 
 bool PerfectSensorProcessor::computeVariances(
@@ -66,10 +55,10 @@ bool PerfectSensorProcessor::computeVariances(
 	Eigen::Matrix3f rotationVariance = robotPoseCovariance.bottomRightCorner(3, 3).cast<float>();
 
 	// Preparations for robot rotation Jacobian (J_q) to minimize computation for every point in point cloud.
-  const Eigen::Matrix3f C_BM_transpose = rotationMapToBase_.transposed().toImplementation().cast<float>();//b_R_m^T
-  const Eigen::RowVector3f P_mul_C_BM_transpose = projectionVector * C_BM_transpose;//P*b_R_m^T
-  const Eigen::Matrix3f C_SB_transpose = rotationBaseToSensor_.transposed().toImplementation().cast<float>();//s_R_b^T
-  const Eigen::Matrix3f B_r_BS_skew = kindr::getSkewMatrixFromVector(Eigen::Vector3f(translationBaseToSensorInBaseFrame_.toImplementation().cast<float>()));//b_r_bs^
+	const Eigen::Matrix3f C_BM_transpose = rotationMapToBase_.transposed().toImplementation().cast<float>();
+	const Eigen::RowVector3f P_mul_C_BM_transpose = projectionVector * C_BM_transpose;
+	const Eigen::Matrix3f C_SB_transpose = rotationBaseToSensor_.transposed().toImplementation().cast<float>();
+	const Eigen::Matrix3f B_r_BS_skew = kindr::getSkewMatrixFromVector(Eigen::Vector3f(translationBaseToSensorInBaseFrame_.toImplementation().cast<float>()));
 
 	for (unsigned int i = 0; i < pointCloud->size(); ++i)
 	{

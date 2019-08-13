@@ -63,7 +63,7 @@ bool RobotMotionMapUpdater::update(
   Covariance rotationCovariance(Covariance::Zero());
   rotationCovariance(2, 2) = relativeCovariance(3, 3);
 
-  // Map to robot pose rotation (R_B_M = R_I_B^T * R_I_M).//WSHY: where map pose be uodated?
+  // Map to robot pose rotation (R_B_M = R_I_B^T * R_I_M).
   RotationMatrixPD mapToRobotRotation = RotationMatrixPD(robotPose.getRotation().inverted() * map.getPose().getRotation());
   RotationMatrixPD mapToPreviousRobotRotationInverted = RotationMatrixPD(previousRobotPose_.getRotation().inverted() * map.getPose().getRotation()).inverted();
 
@@ -78,7 +78,7 @@ bool RobotMotionMapUpdater::update(
   // Preparation for (25): M_r_BP = R_I_M^T (I_r_I_M - I_r_I_B) + M_r_M_P
   // R_I_M^T (I_r_I_M - I_r_I_B):
   const kindr::Position3D positionRobotToMap = map.getPose().getRotation().inverseRotate(
-      map.getPose().getPosition() - previousRobotPose_.getPosition());//M_r_BM
+      map.getPose().getPosition() - previousRobotPose_.getPosition());
 
   // For each cell in map. // TODO Change to new iterator.
   for (unsigned int i = 0; i < size(0); ++i) {

@@ -15,7 +15,6 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
-
 // PCL
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -105,7 +104,8 @@ class ElevationMap
   /*!
    * Removes parts of the map based on visibility criterion with ray tracing.
    * @param transformationSensorToMap
-   * @param updatedTime  */
+   * @param updatedTime
+   */
   void visibilityCleanup(const ros::Time& updatedTime);
 
   /*!
@@ -306,7 +306,6 @@ class ElevationMap
   bool enableVisibilityCleanup_;
   double visibilityCleanupDuration_;
   double scanningDuration_;
-
 };
 
 } /* namespace */
